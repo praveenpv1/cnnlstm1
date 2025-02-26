@@ -63,7 +63,7 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     print("Computing dynamic window size...")
     features = compute_features(df)
     scaler = StandardScaler()
-    # features_scaled = scaler.fit_transform(features)
+    features_scaled = scaler.fit_transform(features)
     # Ensure no NaN or Inf
     features_scaled = np.nan_to_num(features_scaled, nan=0.0, posinf=1.0, neginf=-1.0)
     dbscan = DBSCAN(eps=0.5, min_samples=5)
