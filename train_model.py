@@ -99,14 +99,25 @@ def train_model():
     df = load_data()
     dynamic_windows, df = dynamic_window_size(df)
     print("Preparing training and validation datasets...")
+    # Determine the max window size for consistent input shape
+    max_window_size = max(dynamic_windows)
     X = []
     y = df["pattern_cluster"].values
     # Create input sequences for varying window sizes
     for i in range(len(df)):
         window_size = dynamic_windows[i]
-        # Ensure we have enough data for the current window size
         if i >= window_size:
-            X.append(df[['Open', 'High', 'Low', 'Close']].values[i - window_size:i])
+            # Pad or trim sequences to max_window_size
+            window = df[['Open', 'High', 'Low', 'Close']].values[i - window_size:i]
+            if len(window) < max_window_size:
+                # Pad with zeros if shorter
+                pad = np.zeros((max_window_size - len(window), 4))
+                window = np.vstack((pad, window))
+            elif len(window) > max_window_size:
+                # Trim if longer (shouldn’t happen with current logic, but just in case)
+                window = window[-max_window_size:]
+
+            X.append(window)
 
     X = np.array(X)
     y = np.array(y[window_size - 1:])  # Align labels to match the rolling window size
