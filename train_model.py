@@ -73,7 +73,7 @@ def dynamic_window_size(df, min_window=3, max_window=10):
 
     df = df.copy()
     df["pattern_cluster"] = clusters
-    df = df[df["pattern_cluster"] >= 0]  # Remove noise points
+    df = df[df["pattern_cluster"] >= 0]
 
     label_encoder = LabelEncoder()
     df["pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
@@ -107,13 +107,13 @@ def train_model():
             X.append(window)
             y.append(df["pattern_cluster"].iloc[i])
     
-    X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
-    y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+    scaler = StandardScaler()
+    X = scaler.fit_transform(np.array(X, dtype=np.float32).reshape(-1, 4)).reshape(-1, max_window_size, 4)
+    y = np.array(y, dtype=np.int32)
     
     print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
-    print(f"y unique values before one-hot encoding: {np.unique(y)}")
-    
-    y = to_categorical(y, num_classes=len(np.unique(y)))
+    unique_labels = np.unique(y)
+    y = to_categorical(y, num_classes=len(unique_labels))
     
     print("Building model...")
     model = Sequential([
@@ -131,11 +131,9 @@ def train_model():
     model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
 
     print("Starting model training...")
-    print(f"NaNs in X: {np.isnan(X).sum()}, Infs in X: {np.isinf(X).sum()}")
-    print(f"NaNs in y: {np.isnan(y).sum()}, Infs in y: {np.isinf(y).sum()}")
-    print(f"X min/max: {X.min()}/{X.max()}, y min/max: {y.min()}/{y.max()}")
-    history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[NaNStopping()])
-
+    nan_callback = NaNStopping()
+    history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
+    
     print("Model training completed successfully.")
     model.save('candlestick_model_fixed.keras')
     print("Model saved as 'candlestick_model_fixed.keras'.")
