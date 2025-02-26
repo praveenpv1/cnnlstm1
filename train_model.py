@@ -4,7 +4,7 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout, BatchNormalization, Input
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 from sklearn.cluster import DBSCAN
@@ -28,7 +28,7 @@ def load_data():
     print(f"Data loaded: {df.shape[0]} rows")
     return df
 
-# Feature extraction with NaN checks
+# Feature extraction with stability fixes
 def compute_features(df, max_window_size=10):
     print("Extracting features...")
     body_sizes, upper_wicks, lower_wicks, volatilities, directions = [], [], [], [], []
@@ -52,8 +52,9 @@ def compute_features(df, max_window_size=10):
         "lower_wick": lower_wicks,
         "volatility": volatilities,
         "direction": directions
-    }).replace([np.inf, -np.inf], np.nan).dropna()  # Replace infinite values and drop NaNs
-
+    })
+    
+    features = features.replace([np.inf, -np.inf], np.nan).dropna()  # Replace infinite values and drop NaNs
     print("Feature extraction completed.")
     return features
 
@@ -67,12 +68,12 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     clusters = dbscan.fit_predict(features_scaled)
     
     if np.all(clusters == -1):
-        raise ValueError("All data points were classified as noise by DBSCAN. Adjust parameters.")
-    
+        raise ValueError("❌ All data points were classified as noise by DBSCAN. Adjust clustering parameters.")
+
     df = df.copy()
     df["pattern_cluster"] = clusters
     df = df[df["pattern_cluster"] >= 0]  # Remove noise points
-    
+
     label_encoder = LabelEncoder()
     df["pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
     
@@ -80,6 +81,7 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     print("Window size determination complete.")
     return dynamic_windows, df
 
+# NaN detection callback
 class NaNStopping(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         if logs.get('loss') is None or np.isnan(logs['loss']):
@@ -104,31 +106,43 @@ def train_model():
             X.append(window)
             y.append(df["pattern_cluster"].iloc[i])
     
-    X = np.array(X, dtype=np.float32)  # Ensure float32 precision
+    X = np.array(X, dtype=np.float32)  # Ensure stable precision
     y = np.array(y, dtype=np.int32)
+    
     print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
-    
-    y = to_categorical(y, num_classes=len(set(y)))  # Ensure correct label encoding
-    
+
+    unique_labels = np.unique(y)
+    print(f"Unique labels: {unique_labels}")
+
+    y = to_categorical(y, num_classes=len(unique_labels))  # Ensure correct one-hot encoding
+
     print("Building model...")
     model = Sequential([
-        Conv1D(64, 3, activation='relu', input_shape=(max_window_size, 4)),
+        Input(shape=(max_window_size, 4)),  # Explicit input layer
+        Conv1D(64, 3, activation='relu'),
         BatchNormalization(),
         Dropout(0.3),
         LSTM(128, return_sequences=False),
         Dense(128, activation='relu'),
         Dense(y.shape[1], activation='softmax')
     ])
-    
-    model.compile(optimizer=Adam(learning_rate=1e-3, clipnorm=1.0), loss='categorical_crossentropy', metrics=['accuracy'])
-    
+
+    optimizer = Adam(learning_rate=1e-4, clipvalue=1.0)  # Lower LR & gradient clipping
+
+    model.compile(
+        optimizer=optimizer,
+        loss=tf.keras.losses.CategoricalCrossentropy(from_logits=False),  # Prevent instability
+        metrics=['accuracy']
+    )
+
     print("Starting model training...")
     nan_callback = NaNStopping()
     history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
-    
+
     print("Model training completed successfully.")
-    model.save('candlestick_model_fixed.h5')
-    print("Model saved as 'candlestick_model_fixed.h5'.")
+    model.save('candlestick_model_fixed.keras')  # Save in the recommended format
+    print("Model saved as 'candlestick_model_fixed.keras'.")
+    
     return history.history
 
 if __name__ == '__main__':
