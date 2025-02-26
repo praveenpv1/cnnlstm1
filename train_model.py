@@ -24,11 +24,10 @@ CSV_FILE_PATH = "ohlc_data.csv"
 def load_data():
     print("Loading OHLC data...")
     df = pd.read_csv(CSV_FILE_PATH)
-    df = df[['Open', 'High', 'Low', 'Close']].dropna()  # Drop NaN values
+    df = df[['Open', 'High', 'Low', 'Close']].dropna()
     print(f"Data loaded: {df.shape[0]} rows")
     return df
 
-# Feature extraction with stability fixes
 def compute_features(df, max_window_size=10):
     print("Extracting features...")
     body_sizes, upper_wicks, lower_wicks, volatilities, directions = [], [], [], [], []
@@ -37,7 +36,7 @@ def compute_features(df, max_window_size=10):
         body_size = abs(window["Close"].iloc[-1] - window["Open"].iloc[0])
         upper_wick = window["High"].max() - max(window["Open"].iloc[0], window["Close"].iloc[-1])
         lower_wick = min(window["Open"].iloc[0], window["Close"].iloc[-1]) - window["Low"].min()
-        volatility = (window["High"].max() - window["Low"].min()) / max(1e-6, window["Open"].iloc[0])  # Avoid div by zero
+        volatility = (window["High"].max() - window["Low"].min()) / max(1e-6, window["Open"].iloc[0])
         direction = int(window["Close"].iloc[-1] > window["Open"].iloc[0])
 
         body_sizes.append(body_size)
@@ -54,17 +53,15 @@ def compute_features(df, max_window_size=10):
         "direction": directions
     })
     
-    features = features.replace([np.inf, -np.inf], np.nan).dropna()  # Replace infinite values and drop NaNs
+    features = features.replace([np.inf, -np.inf], np.nan).dropna()
     print("Feature extraction completed.")
     return features
 
-# Dynamic window size function
 def dynamic_window_size(df, min_window=3, max_window=10):
     print("Computing dynamic window size...")
     features = compute_features(df)
     scaler = StandardScaler()
     features_scaled = scaler.fit_transform(features)
-    # Ensure no NaN or Inf
     features_scaled = np.nan_to_num(features_scaled, nan=0.0, posinf=1.0, neginf=-1.0)
     dbscan = DBSCAN(eps=0.5, min_samples=5)
     clusters = dbscan.fit_predict(features_scaled)
@@ -74,7 +71,7 @@ def dynamic_window_size(df, min_window=3, max_window=10):
 
     df = df.copy()
     df["pattern_cluster"] = clusters
-    df = df[df["pattern_cluster"] >= 0]  # Remove noise points
+    df = df[df["pattern_cluster"] >= 0]
 
     label_encoder = LabelEncoder()
     df["pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
@@ -83,14 +80,12 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     print("Window size determination complete.")
     return dynamic_windows, df
 
-# NaN detection callback
 class NaNStopping(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         if logs.get('loss') is None or np.isnan(logs['loss']):
             print(f"❌ NaN detected at epoch {epoch}, stopping training.")
             self.model.stop_training = True
 
-# Model training function
 def train_model():
     df = load_data()
     dynamic_windows, df = dynamic_window_size(df)
@@ -108,51 +103,36 @@ def train_model():
             X.append(window)
             y.append(df["pattern_cluster"].iloc[i])
     
-    # X = np.array(X, dtype=np.float32)  # Ensure stable precision
-    # y = np.array(y, dtype=np.int32)
-
     X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
-    y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+    y = np.array(y, dtype=np.int32)
     
-    print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
-
     unique_labels = np.unique(y)
+    num_classes = len(unique_labels)
     print(f"Unique labels: {unique_labels}")
-
-    y = to_categorical(y, num_classes=len(unique_labels))  # Ensure correct one-hot encoding
+    
+    y_one_hot = to_categorical(y, num_classes=num_classes) if num_classes > 2 else y
+    loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=False) if y_one_hot.ndim > 1 else tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     print("Building model...")
     model = Sequential([
-        Input(shape=(max_window_size, 4)),  # Explicit input layer
+        Input(shape=(max_window_size, 4)),
         Conv1D(64, 3, activation='relu'),
         BatchNormalization(),
         Dropout(0.3),
         LSTM(128, return_sequences=False),
         Dense(128, activation='relu'),
-        Dense(y.shape[1], activation='softmax')
+        Dense(num_classes, activation='softmax' if y_one_hot.ndim > 1 else 'linear')
     ])
-
-    optimizer = Adam(learning_rate=1e-4, clipvalue=1.0)  # Lower LR & gradient clipping
-    loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
-    def custom_loss(y_true, y_pred):
-        loss = loss_fn(y_true, y_pred)
-        loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)  # Replace NaNs with 0
-        return loss
-    model.compile(
-        optimizer=Adam(learning_rate=1e-4, clipvalue=1.0),
-        loss=custom_loss,  # Use NaN-safe loss
-        metrics=['accuracy']
-    )
-
+    
+    optimizer = Adam(learning_rate=1e-3, clipnorm=1.0)
+    model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
+    
     print("Starting model training...")
     nan_callback = NaNStopping()
-    print(f"NaNs in X: {np.isnan(X).sum()}, Infs in X: {np.isinf(X).sum()}")
-    print(f"NaNs in y: {np.isnan(y).sum()}, Infs in y: {np.isinf(y).sum()}")
-    print(f"X min/max: {X.min()}/{X.max()}, y min/max: {y.min()}/{y.max()}")
-    history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
-
+    history = model.fit(X, y_one_hot, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
+    
     print("Model training completed successfully.")
-    model.save('candlestick_model_fixed.keras')  # Save in the recommended format
+    model.save('candlestick_model_fixed.keras')
     print("Model saved as 'candlestick_model_fixed.keras'.")
     
     return history.history
