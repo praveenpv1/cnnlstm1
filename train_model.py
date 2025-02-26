@@ -1,147 +1,56 @@
-import os
 import numpy as np
-import pandas as pd
 import tensorflow as tf
-from tensorflow.keras import mixed_precision
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout, BatchNormalization, Input
-from tensorflow.keras.optimizers import Adam
+from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.utils import to_categorical
-from sklearn.cluster import DBSCAN
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.losses import CategoricalCrossentropy
 
-# Enable mixed precision for faster training
-mixed_precision.set_global_policy('mixed_float16')
+# Load dataset
+X_train = np.load('X_train.npy')
+y_train = np.load('y_train.npy')
+X_val = np.load('X_val.npy')
+y_val = np.load('y_val.npy')
 
-# Check GPU availability
-if tf.config.list_physical_devices('GPU'):
-    print("✅ GPU detected! Training will be accelerated.")
-else:
-    print("❌ No GPU found! Training will be slow.")
+# Normalize Features
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+X_val = scaler.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
 
-CSV_FILE_PATH = "ohlc_data.csv"
+# One-hot encode labels
+y_train = to_categorical(y_train, num_classes=45)
+y_val = to_categorical(y_val, num_classes=45)
 
-def load_data():
-    print("Loading OHLC data...")
-    df = pd.read_csv(CSV_FILE_PATH)
-    df = df[['Open', 'High', 'Low', 'Close']].dropna()  # Drop NaN values
-    print(f"Data loaded: {df.shape[0]} rows")
-    return df
+# Build Model
+model = Sequential([
+    Conv1D(filters=64, kernel_size=3, activation='relu', padding='same', input_shape=(X_train.shape[1], X_train.shape[2])),
+    BatchNormalization(),
+    Dropout(0.2),
+    Conv1D(filters=128, kernel_size=3, activation='relu', padding='same'),
+    BatchNormalization(),
+    Dropout(0.2),
+    LSTM(128, return_sequences=True),
+    LSTM(128, return_sequences=False),
+    Dense(64, activation='relu'),
+    Dropout(0.2),
+    Dense(45, activation='softmax')
+])
 
-# Feature extraction with stability fixes
-def compute_features(df, max_window_size=10):
-    print("Extracting features...")
-    body_sizes, upper_wicks, lower_wicks, volatilities, directions = [], [], [], [], []
-    for i in range(len(df)):
-        window = df.iloc[max(0, i - max_window_size):i + 1]
-        body_size = abs(window["Close"].iloc[-1] - window["Open"].iloc[0])
-        upper_wick = window["High"].max() - max(window["Open"].iloc[0], window["Close"].iloc[-1])
-        lower_wick = min(window["Open"].iloc[0], window["Close"].iloc[-1]) - window["Low"].min()
-        volatility = (window["High"].max() - window["Low"].min()) / max(1e-6, window["Open"].iloc[0])  # Avoid div by zero
-        direction = int(window["Close"].iloc[-1] > window["Open"].iloc[0])
+# Compile Model
+optimizer = Adam(learning_rate=1e-5)
+loss_fn = CategoricalCrossentropy(from_logits=False)
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
 
-        body_sizes.append(body_size)
-        upper_wicks.append(upper_wick)
-        lower_wicks.append(lower_wick)
-        volatilities.append(volatility)
-        directions.append(direction)
+# Train Model
+model.fit(
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    epochs=25,
+    batch_size=64,
+    class_weight={i: 1.0 for i in range(45)},  # Adjust if needed
+    verbose=1
+)
 
-    features = pd.DataFrame({
-        "body_size": body_sizes,
-        "upper_wick": upper_wicks,
-        "lower_wick": lower_wicks,
-        "volatility": volatilities,
-        "direction": directions
-    })
-    
-    features = features.replace([np.inf, -np.inf], np.nan).dropna()  # Replace infinite values and drop NaNs
-    print("Feature extraction completed.")
-    return features
-
-# Dynamic window size function
-def dynamic_window_size(df, min_window=3, max_window=10):
-    print("Computing dynamic window size...")
-    features = compute_features(df)
-    scaler = StandardScaler()
-    features_scaled = scaler.fit_transform(features)
-    features_scaled = np.nan_to_num(features_scaled, nan=0.0, posinf=1.0, neginf=-1.0)
-    dbscan = DBSCAN(eps=0.5, min_samples=5)
-    clusters = dbscan.fit_predict(features_scaled)
-    
-    if np.all(clusters == -1):
-        raise ValueError("❌ All data points were classified as noise by DBSCAN. Adjust clustering parameters.")
-
-    df = df.copy()
-    df["pattern_cluster"] = clusters
-    df = df[df["pattern_cluster"] >= 0]
-
-    label_encoder = LabelEncoder()
-    df["pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
-    
-    dynamic_windows = [min(max_window, max(min_window, 3 + abs(c) // 2)) for c in df["pattern_cluster"]]
-    print("Window size determination complete.")
-    return dynamic_windows, df
-
-# NaN detection callback
-class NaNStopping(tf.keras.callbacks.Callback):
-    def on_epoch_end(self, epoch, logs=None):
-        if logs.get('loss') is None or np.isnan(logs['loss']):
-            print(f"❌ NaN detected at epoch {epoch}, stopping training.")
-            self.model.stop_training = True
-
-# Model training function
-def train_model():
-    df = load_data()
-    dynamic_windows, df = dynamic_window_size(df)
-    print("Preparing training datasets...")
-    max_window_size = max(dynamic_windows)
-    X, y = [], []
-    
-    for i in range(len(df)):
-        window_size = dynamic_windows[i]
-        if i >= window_size:
-            window = df[['Open', 'High', 'Low', 'Close']].values[i - window_size:i]
-            if len(window) < max_window_size:
-                pad = np.zeros((max_window_size - len(window), 4))
-                window = np.vstack((pad, window))
-            X.append(window)
-            y.append(df["pattern_cluster"].iloc[i])
-    
-    scaler = StandardScaler()
-    X = scaler.fit_transform(np.array(X, dtype=np.float32).reshape(-1, 4)).reshape(-1, max_window_size, 4)
-    y = np.array(y, dtype=np.int32)
-    
-    print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
-    unique_labels = np.unique(y)
-    y = to_categorical(y, num_classes=len(unique_labels))
-    
-    print("Building model...")
-    model = Sequential([
-        Input(shape=(max_window_size, 4)),
-        Conv1D(64, 3, activation='relu'),
-        BatchNormalization(),
-        Dropout(0.3),
-        LSTM(128, return_sequences=False),
-        Dense(128, activation='relu'),
-        Dense(y.shape[1], activation='softmax')
-    ])
-
-    optimizer = Adam(learning_rate=1e-5, clipnorm=1.0)
-    loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
-
-    print("Starting model training...")
-    nan_callback = NaNStopping()
-    history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
-    
-    print("Model training completed successfully.")
-    model.save('candlestick_model_fixed.keras')
-    print("Model saved as 'candlestick_model_fixed.keras'.")
-    
-    return history.history
-
-if __name__ == '__main__':
-    history = train_model()
-    print(f"📊 Final Training Loss: {history['loss'][-1]}")
-    print(f"📊 Final Validation Loss: {history['val_loss'][-1]}")
-    print("🎉 Training complete!")
+# Save Model
+model.save('trained_model.h5')
