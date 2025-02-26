@@ -20,14 +20,12 @@ else:
 # Load OHLC data from CSV
 CSV_FILE_PATH = "ohlc_data.csv"
 
-
 def load_data():
     print("Loading OHLC data...")
     df = pd.read_csv(CSV_FILE_PATH)
     df = df[['Open', 'High', 'Low', 'Close']]  # Ensure only OHLC columns are used
     print(f"Data loaded: {df.shape[0]} rows")
     return df
-
 
 # Feature extraction
 
@@ -58,12 +56,10 @@ def compute_features(df, max_window_size=10):
     print("Feature extraction completed.")
     return features
 
-
 # Dynamic window size function
 
 def dynamic_window_size(df, min_window=3, max_window=10):
     print("Computing dynamic window size based on clustering and volatility...")
-    # Compute features
     features = compute_features(df)
 
     # Scale features for DBSCAN
@@ -74,16 +70,14 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     dbscan = DBSCAN(eps=0.5, min_samples=5)
     clusters = dbscan.fit_predict(features_scaled)
 
-    # Ensure changes are made safely without "SettingWithCopyWarning"
     df = df.copy()  # Ensure we're working with a full copy, not a view
-    df.loc[:, "pattern_cluster"] = clusters
+    df["pattern_cluster"] = clusters
 
     # Filter valid clusters and reindex them
     df = df.loc[df["pattern_cluster"] >= 0].copy()
     label_encoder = LabelEncoder()
-    df.loc[:, "pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
+    df["pattern_cluster"] = label_encoder.fit_transform(df["pattern_cluster"])
 
-    # Dynamically adjust window size based on the cluster size or volatility
     dynamic_windows = []
     for i in range(len(df)):
         cluster_id = df["pattern_cluster"].iloc[i]
@@ -92,7 +86,6 @@ def dynamic_window_size(df, min_window=3, max_window=10):
 
     print("Window size determination complete.")
     return dynamic_windows, df
-
 
 # Model training function
 
@@ -104,21 +97,16 @@ def train_model():
     max_window_size = max(dynamic_windows)
     X, y = [], []
 
-    # Ensure we only gather labels that have corresponding windows
     for i in range(len(df)):
         window_size = dynamic_windows[i]
         if i >= window_size:
             window = df[['Open', 'High', 'Low', 'Close']].values[i - window_size:i]
-            if len(window) < max_window_size:
-                pad = np.zeros((max_window_size - len(window), 4))
-                window = np.vstack((pad, window))
-            elif len(window) > max_window_size:
-                window = window[-max_window_size:]
+            pad = np.zeros((max_window_size - len(window), 4)) if len(window) < max_window_size else window[-max_window_size:]
+            window = np.vstack((pad, window)) if len(window) < max_window_size else pad
 
             X.append(window)
-            y.append(df["pattern_cluster"].iloc[i])  # Ensure aligned labels
+            y.append(df["pattern_cluster"].iloc[i])
 
-    # Convert to numpy arrays
     X = np.array(X)
     y = np.array(y)
 
@@ -142,7 +130,6 @@ def train_model():
     model.save('candlestickfivemin_model_dynamic.h5')
     print("Model saved as 'candlestickfivemin_model_dynamic.h5'.")
     return history.history
-
 
 if __name__ == '__main__':
     history = train_model()
