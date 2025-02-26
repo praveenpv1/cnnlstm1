@@ -5,8 +5,10 @@ import tensorflow as tf
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv1D, LSTM, Dense
+from keras.optimizers import Adam
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+
 
 
 # Enable mixed precision for faster training on H100
@@ -119,8 +121,13 @@ def train_model():
 
             X.append(window)
 
+    
     X = np.array(X)
     y = np.array(y[window_size - 1:])  # Align labels to match the rolling window size
+    print("NaNs in X:", np.isnan(X).sum())
+    print("Infinities in X:", np.isinf(X).sum())
+    print("NaNs in y:", np.isnan(y).sum())
+    print("Infinities in y:", np.isinf(y).sum())
     print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
 
     print("Building model...")
@@ -131,7 +138,10 @@ def train_model():
         Dense(64, activation='relu'),
         Dense(len(set(y)), activation='softmax')  # Dynamic classification
     ])
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    # optimizer = Adam(learning_rate=0.001, clipnorm=1.0)
+    # model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+    # model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     print("Starting model training...")
     history = model.fit(X, y, epochs=15, batch_size=16, validation_split=0.2)
     print("Model training completed successfully.")
