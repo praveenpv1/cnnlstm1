@@ -63,7 +63,9 @@ def dynamic_window_size(df, min_window=3, max_window=10):
     print("Computing dynamic window size...")
     features = compute_features(df)
     scaler = StandardScaler()
-    features_scaled = scaler.fit_transform(features)
+    # features_scaled = scaler.fit_transform(features)
+    # Ensure no NaN or Inf
+    features_scaled = np.nan_to_num(features_scaled, nan=0.0, posinf=1.0, neginf=-1.0)
     dbscan = DBSCAN(eps=0.5, min_samples=5)
     clusters = dbscan.fit_predict(features_scaled)
     
@@ -106,8 +108,11 @@ def train_model():
             X.append(window)
             y.append(df["pattern_cluster"].iloc[i])
     
-    X = np.array(X, dtype=np.float32)  # Ensure stable precision
-    y = np.array(y, dtype=np.int32)
+    # X = np.array(X, dtype=np.float32)  # Ensure stable precision
+    # y = np.array(y, dtype=np.int32)
+
+    X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
+    y = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
     
     print(f"Training data prepared: X shape {X.shape}, y shape {y.shape}")
 
@@ -128,15 +133,22 @@ def train_model():
     ])
 
     optimizer = Adam(learning_rate=1e-4, clipvalue=1.0)  # Lower LR & gradient clipping
-
+    loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=False)
+    def custom_loss(y_true, y_pred):
+        loss = loss_fn(y_true, y_pred)
+        loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)  # Replace NaNs with 0
+        return loss
     model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.CategoricalCrossentropy(from_logits=False),  # Prevent instability
+        optimizer=Adam(learning_rate=1e-4, clipvalue=1.0),
+        loss=custom_loss,  # Use NaN-safe loss
         metrics=['accuracy']
     )
 
     print("Starting model training...")
     nan_callback = NaNStopping()
+    print(f"NaNs in X: {np.isnan(X).sum()}, Infs in X: {np.isinf(X).sum()}")
+    print(f"NaNs in y: {np.isnan(y).sum()}, Infs in y: {np.isinf(y).sum()}")
+    print(f"X min/max: {X.min()}/{X.max()}, y min/max: {y.min()}/{y.max()}")
     history = model.fit(X, y, epochs=25, batch_size=32, validation_split=0.2, callbacks=[nan_callback])
 
     print("Model training completed successfully.")
